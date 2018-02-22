@@ -3,36 +3,40 @@ extern crate failure;
 extern crate failure_derive;
 
 mod error;
-mod ast;
-mod eval;
+mod lang;
 mod types;
 
-use ast::{Ast, Seg, Sym};
+use lang::{Expr, Model, Seg, Sym};
 use types::Typed;
 use types::Type;
 
 fn main() {
-    let func = Ast::func(
+    let mut model = Model::new();
+    model.define("Bob", Expr::entity("Bob"));
+
+    let func = Expr::func(
         Typed::new("y", "e"),
-        vec![Seg::expr(Ast::sym("y")), Seg::str(" is a Bob")],
+        Expr::truth(vec![Seg::expr(Expr::sym("y")), Seg::str(" is a Bob")]),
     );
 
-    // let mut program =
-    //     Ast::func(Typed::new("x", "e"), func.compose("x")).compose(vec![Seg::str("Joe")]);
+    let mut program = Expr::func(
+        Typed::new("f", Type::func("e", "t")),
+        Expr::sym("f").compose(Expr::mref("Bob")),
+    ).compose(func);
 
-    // println!("{}", program);
-    // loop {
-    //     program = match program.eval() {
-    //         Ok(new_program) => new_program,
-    //         Err(error) => {
-    //             println!("{}", error);
-    //             break;
-    //         }
-    //     };
-    //     println!("{}", program);
+    println!("{}", program);
+    loop {
+        program = match program.eval(&model) {
+            Ok(new_program) => new_program,
+            Err(error) => {
+                println!("{}", error);
+                break;
+            }
+        };
+        println!("{}", program);
 
-    //     if program.complete() {
-    //         break;
-    //     }
-    // }
+        if program.is_complete() {
+            break;
+        }
+    }
 }

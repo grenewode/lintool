@@ -3,9 +3,17 @@ use error::{Error, Result};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Type {
-    StrLit,
     Named(String),
     Func(Box<Type>, Box<Type>),
+}
+
+impl Type {
+    pub fn named<N: Into<String>>(name: N) -> Self {
+        Type::Named(name.into())
+    }
+    pub fn func<A: Into<Type>, B: Into<Type>>(arg: A, body: B) -> Self {
+        Type::Func(Box::new(arg.into()), Box::new(body.into()))
+    }
 }
 
 impl From<String> for Type {
@@ -23,21 +31,9 @@ impl<'a> From<&'a str> for Type {
 impl Display for Type {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
-            Type::StrLit => write!(f, "str"),
             Type::Named(ref name) => write!(f, "{}", name),
             Type::Func(ref arg, ref out) => write!(f, "<{}, {}>", arg, out),
         }
-    }
-}
-
-impl Type {
-    pub fn compose(&self, other: &Type) -> Result<Type> {
-        if let Type::Func(ref input, ref output) = *self {
-            if **input == *other {
-                return Ok(**output);
-            }
-        }
-        Err(Error::CannotCompose(self.clone(), other.clone()))
     }
 }
 
