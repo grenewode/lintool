@@ -1,0 +1,8 @@
+[package]
+name = "lintool"
+version = "0.1.0"
+authors = ["grenewode <grenewodemiller@gmail.com>"]
+
+[dependencies]
+failure = "0.1.1"
+failure_derive = "0.1.1"
