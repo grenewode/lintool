@@ -27,12 +27,17 @@ impl<'a> From<&'a str> for Type {
         Type::Named(name.into())
     }
 }
+impl<T1: Into<Type>, T2: Into<Type>> From<(T1, T2)> for Type {
+    fn from(name: (T1, T2)) -> Self {
+        Type::func(name.0, name.1)
+    }
+}
 
 impl Display for Type {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
             Type::Named(ref name) => write!(f, "{}", name),
-            Type::Func(ref arg, ref out) => write!(f, "<{}, {}>", arg, out),
+            Type::Func(ref arg, ref out) => write!(f, "\u{27e8}{}, {}\u{27e9}", arg, out),
         }
     }
 }
@@ -55,6 +60,21 @@ impl<E> Typed<E> {
 impl<E: Display> Display for Typed<E> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let Typed { ref expr, ref tp } = *self;
-        write!(f, "{}:{}", expr, tp)
+        if let Type::Named(ref name) = *tp {
+            if name == "e" {
+                return write!(f, "{}", expr);
+            }
+        };
+        write!(f, "{expr}:{tp}", expr = expr, tp = tp)
+    }
+}
+
+impl<E, E1, T> From<(E1, T)> for Typed<E>
+where
+    E1: Into<E>,
+    T: Into<Type>,
+{
+    fn from((expr, tp): (E1, T)) -> Self {
+        Self::new(expr, tp)
     }
 }

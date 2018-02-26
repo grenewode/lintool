@@ -23,7 +23,7 @@ impl<'a> From<&'a str> for Ref {
 
 impl Display for Ref {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "⟦{}⟧", self.0)
+        write!(f, "\u{27e6}{}\u{27e7}", self.0)
     }
 }
 
@@ -60,6 +60,12 @@ impl<'a> From<&'a str> for Sym {
     }
 }
 
+impl From<Expr> for Seg<Expr> {
+    fn from(expr: Expr) -> Seg<Expr> {
+        Seg::Expr(expr)
+    }
+}
+
 impl Display for Sym {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -82,11 +88,42 @@ impl<T> Seg<T> {
     }
 }
 
+impl<T> From<String> for Seg<T> {
+    fn from(string: String) -> Self {
+        Seg::str(string)
+    }
+}
+impl<'a, T> From<&'a str> for Seg<T> {
+    fn from(string: &'a str) -> Self {
+        Seg::str(string)
+    }
+}
+
 impl Seg<Expr> {
-    pub fn do_sub(self, model: &Model, binding: &Typed<Sym>, value: Expr) -> Result<Seg<Expr>> {
+    pub fn subs(self, model: &Model, binding: &Typed<Sym>, value: Expr) -> Result<Seg<Expr>> {
         match self {
             Seg::Str(string) => Ok(Seg::Str(string)),
-            Seg::Expr(expr) => Ok(Seg::expr(expr.do_sub(model, binding, value)?)),
+            Seg::Expr(expr) => expr.subs(model, binding, value).map(Seg::expr),
+        }
+    }
+
+    pub fn do_compose(self, model: &Model) -> Result<(Seg<Expr>, bool)> {
+        match self {
+            Seg::Str(string) => Ok((Seg::Str(string), false)),
+            Seg::Expr(expr) => {
+                let (new_expr, changed) = expr.do_compose(model)?;
+                Ok((Seg::expr(new_expr), changed))
+            }
+        }
+    }
+
+    pub fn do_expand(self, model: &Model) -> Result<(Seg<Expr>, bool)> {
+        match self {
+            Seg::Str(string) => Ok((Seg::Str(string), false)),
+            Seg::Expr(expr) => {
+                let (new_expr, changed) = expr.do_expand(model)?;
+                Ok((Seg::expr(new_expr), changed))
+            }
         }
     }
 }
@@ -136,9 +173,17 @@ impl Expr {
     pub fn mref<R: Into<Ref>>(mref: R) -> Self {
         Expr::RefLit(mref.into())
     }
-}
 
-impl Expr {
+    pub fn append_truth<T: Into<Seg<Self>>>(self, truth: T) -> Self {
+        match self {
+            Expr::TruthLit(mut all) => {
+                all.push(truth.into());
+                Expr::truth(all)
+            }
+            _ => Expr::truth(vec![self.into(), truth.into()]),
+        }
+    }
+
     pub fn get_type(&self, model: &Model) -> Result<Type> {
         match *self {
             Expr::Sym(ref sym) => Err(Error::UnboundSymbol(sym.clone())),
@@ -157,90 +202,137 @@ impl Expr {
                         return Ok(*output.clone());
                     }
                 }
-                Err(Error::CannotCompose(
-                    Expr::Compose(a.clone(), b.clone()),
-                    a_type,
-                    b_type,
-                ))
+                Err(Error::CannotCompose(*a.clone(), *b.clone(), a_type, b_type))
             }
         }
     }
 
-    pub fn do_compose(self, model: &Model, arg: Self) -> Result<Self> {
-        let use_function_compose = if let &Expr::Func(ref arg_binding, ..) = &self {
-            arg_binding.tp == arg.get_type(model)?
-        } else {
-            false
-        };
-
-        if use_function_compose {
-            match self {
-                Expr::Func(arg_binding, body) => body.do_sub(model, &arg_binding, arg),
-                _ => unreachable!(),
-            }
-        } else {
-            let arg_tp = arg.get_type(model)?;
-            let self_tp = self.get_type(model)?;
-            let expr = Expr::compose(self, arg);
-            Err(Error::CannotCompose(expr, self_tp, arg_tp))
-        }
-    }
-
-    pub fn eval(self, model: &Model) -> Result<Self> {
+    pub fn subs(self, model: &Model, binding: &Typed<Sym>, value: Self) -> Result<Self> {
         match self {
-            Expr::Compose(a, b) => a.do_compose(model, *b),
-            t @ Expr::TruthLit(..) => Ok(t),
-            _ => Err(Error::PartialExpression(self)),
-        }
-    }
-
-    pub fn do_sub(self, model: &Model, binding: &Typed<Sym>, value: Self) -> Result<Self> {
-        match self {
+            Expr::EntityLit(..) | Expr::RefLit(..) => Ok(self),
             Expr::Sym(sym) => if sym == binding.expr {
                 Ok(value)
             } else {
-                Ok(Expr::Sym(sym))
+                Ok(Expr::sym(sym))
             },
             Expr::TruthLit(segements) => Ok(Expr::truth(segements
                 .into_iter()
-                .map(|segment| segment.do_sub(model, binding, value.clone()))
+                .map(|segment| segment.subs(model, binding, value.clone()))
                 .collect::<Result<Vec<_>>>()?)),
-            a @ Expr::EntityLit(..) => Ok(a),
-            Expr::RefLit(ref mref) => model.lookup(mref).map(|expr| expr.clone()),
             Expr::Func(arg_binding, body) => if arg_binding.expr != binding.expr {
                 // If the function does not shadow this symbol, we can continue to substitute
-                Ok(Expr::func(arg_binding, body.do_sub(model, binding, value)?))
+                Ok(Expr::func(arg_binding, body.subs(model, binding, value)?))
             } else {
                 // The function shadows this symbol, so we don't substitute into it
                 Ok(Expr::func(arg_binding, *body))
             },
             Expr::Compose(a, b) => Ok(Expr::compose(
-                a.do_sub(model, binding, value.clone())?,
-                b.do_sub(model, binding, value.clone())?,
+                a.subs(model, binding, value.clone())?,
+                b.subs(model, binding, value.clone())?,
             )),
         }
     }
 
-    pub fn is_complete_with_scope(&self, syms: &mut Vec<Sym>) -> bool {
-        match *self {
-            Expr::Sym(ref sym) => syms.contains(sym),
-            Expr::Func(ref arg_binding, ref body) => {
-                syms.push(arg_binding.expr.clone());
-                let body_complete = body.is_complete_with_scope(syms);
-                syms.pop();
-                body_complete
+    pub fn do_expand(self, model: &Model) -> Result<(Self, bool)> {
+        match self {
+            Expr::EntityLit(..) | Expr::Sym(..) => Ok((self, false)),
+            Expr::RefLit(mref) => model.lookup(&mref).map(|expr| (expr.clone(), true)),
+            Expr::Func(arg, body) => {
+                let (body, changed) = body.do_expand(model)?;
+                Ok((Expr::func(arg, body), changed))
             }
-            Expr::Compose(..) | Expr::RefLit(..) => false,
-            Expr::EntityLit(_) => true,
-            Expr::TruthLit(ref segments) => segments.iter().all(|segement| match *segement {
-                Seg::Expr(ref expr) => expr.is_complete_with_scope(syms),
-                Seg::Str(_) => true,
-            }),
+            Expr::TruthLit(segements) => {
+                let mut any_changed = false;
+                Ok((
+                    Expr::truth(segements
+                        .into_iter()
+                        .map(|segment| {
+                            if any_changed {
+                                return Ok(segment);
+                            }
+                            let (seg, changed) = segment.do_expand(model)?;
+                            any_changed = changed;
+                            Ok(seg)
+                        })
+                        .collect::<Result<Vec<_>>>()?),
+                    any_changed,
+                ))
+            }
+            Expr::Compose(a, b) => {
+                let (new_b, changed) = b.do_expand(model)?;
+                if changed {
+                    return Ok((Expr::compose(*a, new_b), true));
+                }
+                let a = *a;
+                match a {
+                    Expr::Func(arg, body) => Ok((body.subs(model, &arg, new_b)?, true)),
+                    a @ _ => {
+                        let (new_a, changed) = a.do_expand(model)?;
+                        Ok((Expr::compose(new_a, new_b), changed))
+                    }
+                }
+            }
         }
     }
 
-    pub fn is_complete(&self) -> bool {
-        self.is_complete_with_scope(&mut Vec::new())
+    pub fn do_compose(self, model: &Model) -> Result<(Self, bool)> {
+        match self {
+            Expr::EntityLit(..) | Expr::Sym(..) | Expr::Func(..) | Expr::RefLit(..) => {
+                Ok((self, false))
+            }
+            Expr::TruthLit(segements) => {
+                let mut any_changed = false;
+                Ok((
+                    Expr::truth(segements
+                        .into_iter()
+                        .map(|segment| {
+                            if any_changed {
+                                return Ok(segment);
+                            }
+                            let (seg, changed) = segment.do_compose(model)?;
+                            any_changed = changed;
+                            Ok(seg)
+                        })
+                        .collect::<Result<Vec<_>>>()?),
+                    any_changed,
+                ))
+            }
+            Expr::Compose(a, b) => {
+                let (new_b, changed) = b.do_compose(model)?;
+                if changed {
+                    return Ok((Expr::compose(*a, new_b), true));
+                }
+                let a = *a;
+                match a {
+                    Expr::Func(arg, body) => {
+                        let arg_tp = &arg.tp;
+                        let b_tp = new_b.get_type(model)?;
+                        if *arg_tp == b_tp {
+                            Ok((body.subs(model, &arg, new_b)?, true))
+                        } else {
+                            Err(Error::CannotCompose(
+                                Expr::Func(arg.clone(), body),
+                                new_b,
+                                arg_tp.clone(),
+                                b_tp,
+                            ))
+                        }
+                    }
+                    a @ _ => {
+                        let (new_a, changed) = a.do_compose(model)?;
+                        Ok((Expr::compose(new_a, new_b), changed))
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn eval(self, model: &Model) -> Result<(Self, bool)> {
+        let (composed, changed) = self.do_compose(model)?;
+        if changed {
+            return Ok((composed, true));
+        }
+        composed.do_expand(model)
     }
 }
 
@@ -255,9 +347,9 @@ impl Display for Expr {
                 Ok(())
             }
             Expr::RefLit(ref mref) => mref.fmt(f),
-            Expr::EntityLit(ref name) => write!(f, "@{}", name),
-            Expr::Func(ref arg, ref body) => write!(f, "λ{} [{}]", arg, body),
-            Expr::Compose(ref a, ref b) => write!(f, "({})({})", a, b),
+            Expr::EntityLit(ref name) => name.fmt(f),
+            Expr::Func(ref arg, ref body) => write!(f, "\u{03bb}{} [{}]", arg, body),
+            Expr::Compose(ref a, ref b) => write!(f, "{}({})", a, b),
         }
     }
 }
